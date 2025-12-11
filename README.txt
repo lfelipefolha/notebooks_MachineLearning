@@ -1,20 +1,19 @@
-# notebooks_MachineLearning
-Vou estar fazendo o upload de alguns testes com ML em python
 """
-Sistema de Alocação de Membros em Squads
-========================================
-Resolve dois problemas:
-1. Redistribuição de membros entre squads de uma linha
-2. Alocação de pessoas desalocadas em squads com déficit
+Sistema de Alocação de Membros em Squads - VERSÃO EXPANDIDA
+===========================================================
+Com visualizações e dados que forçam redistribuições visíveis.
 
-Usa Google OR-Tools (CP-SAT) para otimização com restrições.
-
-Instalação: pip install ortools pandas
+Instalação: pip install ortools pandas matplotlib seaborn numpy
 """
 
 from ortools.sat.python import cp_model
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import pandas as pd
+from collections import defaultdict
 
 
 # =============================================================================
@@ -25,10 +24,10 @@ from typing import Optional
 class Pessoa:
     id: str
     nome: str
-    papel: str  # dev, qa, data_engineer, data_scientist, tech_lead, etc.
-    senioridade: str  # junior, pleno, senior, especialista
-    skills: dict  # skill -> nível (1-5, do formulário de autopercepção)
-    squad_atual: str = None  # None se desalocado
+    papel: str
+    senioridade: str
+    skills: dict
+    squad_atual: str = None
     linha_atual: str = None
 
 
@@ -39,106 +38,156 @@ class Squad:
     linha: str
     capacidade_max: int
     capacidade_min: int
-    necessidades: dict  # papel -> quantidade mínima necessária
-    skills_desejadas: dict  # skill -> nível mínimo desejado
+    necessidades: dict
+    skills_desejadas: dict
 
 
 @dataclass
 class Restricao:
-    """Restrições parametrizáveis"""
-    tipo: str  # 'bloquear', 'forcar', 'preferencia'
+    tipo: str
     pessoa_id: str = None
     squad_id: str = None
     linha_id: str = None
-    peso: int = 1  # para preferências
+    peso: int = 1
 
 
 # =============================================================================
-# 2. DADOS DE EXEMPLO (simula seu cenário)
+# 2. DADOS EXPANDIDOS (com pessoas MAL ALOCADAS propositalmente)
 # =============================================================================
 
-def criar_dados_exemplo():
-    """Cria dados fictícios para demonstração"""
+def criar_dados_expandidos():
+    """
+    Cria dados com pessoas claramente mal alocadas para forçar redistribuições.
+    """
     
-    # ----- PESSOAS -----
     pessoas = [
-        # Pessoas alocadas na Linha Alpha
+        # ===================== LINHA ALPHA =====================
+        
+        # --- Squad A1: Pagamentos (precisa: Python, AWS, Java backend) ---
+        # BEM alocados:
         Pessoa("p1", "Ana Silva", "dev", "senior", 
-               {"python": 5, "java": 3, "react": 4, "aws": 4}, 
+               {"python": 5, "java": 5, "aws": 5, "docker": 4}, 
                "squad_a1", "alpha"),
         Pessoa("p2", "Bruno Costa", "dev", "pleno", 
-               {"python": 4, "java": 4, "react": 2, "aws": 2}, 
+               {"python": 4, "java": 4, "aws": 3, "sql": 4}, 
                "squad_a1", "alpha"),
-        Pessoa("p3", "Carla Dias", "qa", "senior", 
-               {"automacao": 5, "python": 3, "cypress": 5}, 
-               "squad_a1", "alpha"),
-        Pessoa("p4", "Diego Alves", "data_engineer", "pleno", 
-               {"python": 4, "spark": 4, "sql": 5, "aws": 3}, 
-               "squad_a2", "alpha"),
-        Pessoa("p5", "Elena Rocha", "dev", "junior", 
-               {"python": 3, "java": 2, "react": 3}, 
-               "squad_a2", "alpha"),
-        Pessoa("p6", "Felipe Lima", "qa", "pleno", 
-               {"automacao": 4, "cypress": 4, "selenium": 3}, 
-               "squad_a2", "alpha"),
-        Pessoa("p7", "Gabi Nunes", "data_scientist", "senior", 
-               {"python": 5, "ml": 5, "sql": 4, "spark": 3}, 
-               "squad_a3", "alpha"),
-        Pessoa("p8", "Hugo Martins", "dev", "senior", 
-               {"python": 4, "java": 5, "react": 3, "aws": 5}, 
-               "squad_a3", "alpha"),
+        # MAL alocado - tem skills de DATA, não backend:
+        Pessoa("p3", "Carlos Mendes", "data_engineer", "senior", 
+               {"spark": 5, "python": 4, "kafka": 5, "airflow": 4, "java": 1}, 
+               "squad_a1", "alpha"),  # Deveria estar em Analytics ou Data Platform
+        # MAL alocado - tem skills de FRONTEND, não backend:
+        Pessoa("p4", "Daniela Rocha", "dev", "pleno", 
+               {"react": 5, "typescript": 5, "css": 4, "python": 2, "aws": 1}, 
+               "squad_a1", "alpha"),  # Deveria estar em Checkout ou Mobile
         
-        # Pessoas DESALOCADAS (sem squad)
-        Pessoa("p9", "Iris Campos", "dev", "pleno", 
-               {"python": 4, "react": 5, "typescript": 4}, 
+        # --- Squad A2: Checkout (precisa: React, TypeScript, Node) ---
+        # BEM alocado:
+        Pessoa("p5", "Eduardo Lima", "dev", "senior", 
+               {"react": 5, "typescript": 5, "node": 4, "graphql": 4}, 
+               "squad_a2", "alpha"),
+        # MAL alocado - tem skills de BACKEND Java, não frontend:
+        Pessoa("p6", "Fernanda Dias", "dev", "pleno", 
+               {"java": 5, "spring": 5, "aws": 4, "docker": 4, "react": 1}, 
+               "squad_a2", "alpha"),  # Deveria estar em Pagamentos
+        # MAL alocado - QA com skills de automação backend, squad precisa de frontend QA:
+        Pessoa("p7", "Gabriel Santos", "qa", "senior", 
+               {"selenium": 5, "java": 4, "api_testing": 5, "cypress": 1}, 
+               "squad_a2", "alpha"),
+        # BEM alocado:
+        Pessoa("p8", "Helena Martins", "dev", "junior", 
+               {"react": 4, "typescript": 3, "css": 4, "html": 5}, 
+               "squad_a2", "alpha"),
+        
+        # --- Squad A3: Analytics (precisa: Python, Spark, ML, SQL) ---
+        # BEM alocado:
+        Pessoa("p9", "Igor Ferreira", "data_scientist", "senior", 
+               {"python": 5, "ml": 5, "spark": 4, "sql": 5, "tensorflow": 4}, 
+               "squad_a3", "alpha"),
+        # MAL alocado - Dev frontend em squad de dados:
+        Pessoa("p10", "Julia Alves", "dev", "pleno", 
+               {"react": 5, "vue": 4, "typescript": 5, "node": 3, "python": 2}, 
+               "squad_a3", "alpha"),  # Deveria estar em Checkout
+        # MAL alocado - QA sem skills de dados:
+        Pessoa("p11", "Kevin Souza", "qa", "pleno", 
+               {"cypress": 5, "javascript": 4, "playwright": 4, "python": 2}, 
+               "squad_a3", "alpha"),  # Deveria estar em Checkout
+        
+        # --- Squad A4: API Gateway (precisa: Java, Spring, AWS, Kubernetes) ---
+        # BEM alocado:
+        Pessoa("p12", "Larissa Nunes", "dev", "senior", 
+               {"java": 5, "spring": 5, "kubernetes": 5, "aws": 5}, 
+               "squad_a4", "alpha"),
+        # BEM alocado:
+        Pessoa("p13", "Marcos Oliveira", "dev", "pleno", 
+               {"java": 4, "spring": 4, "docker": 4, "aws": 3}, 
+               "squad_a4", "alpha"),
+        # MAL alocado - Data Scientist em squad de infra:
+        Pessoa("p14", "Natalia Campos", "data_scientist", "pleno", 
+               {"python": 5, "ml": 4, "pandas": 5, "sql": 4, "java": 1}, 
+               "squad_a4", "alpha"),  # Deveria estar em Analytics
+        # MAL alocado - Dev Python/Data em squad Java:
+        Pessoa("p15", "Oscar Ribeiro", "dev", "senior", 
+               {"python": 5, "spark": 4, "sql": 5, "aws": 4, "java": 2}, 
+               "squad_a4", "alpha"),  # Deveria estar em Analytics ou Data
+        
+        # ===================== PESSOAS DESALOCADAS =====================
+        Pessoa("p16", "Patricia Lopes", "dev", "pleno", 
+               {"react": 5, "typescript": 5, "next": 4, "css": 4}, 
                None, None),
-        Pessoa("p10", "João Pedro", "qa", "junior", 
-               {"automacao": 3, "cypress": 3, "python": 2}, 
+        Pessoa("p17", "Quirino Melo", "data_engineer", "senior", 
+               {"spark": 5, "kafka": 5, "python": 5, "airflow": 5, "aws": 4}, 
                None, None),
-        Pessoa("p11", "Karen Souza", "data_engineer", "senior", 
-               {"python": 5, "spark": 5, "sql": 5, "aws": 4, "kafka": 4}, 
+        Pessoa("p18", "Renata Gomes", "qa", "pleno", 
+               {"cypress": 5, "playwright": 4, "typescript": 4, "api_testing": 3}, 
                None, None),
-        Pessoa("p12", "Lucas Ferreira", "dev", "pleno", 
-               {"java": 5, "spring": 4, "aws": 3}, 
+        Pessoa("p19", "Samuel Castro", "dev", "junior", 
+               {"python": 3, "java": 3, "sql": 3, "git": 4}, 
                None, None),
-        Pessoa("p13", "Mariana Oliveira", "data_scientist", "pleno", 
-               {"python": 4, "ml": 4, "sql": 3, "estatistica": 4}, 
+        Pessoa("p20", "Tatiana Reis", "data_scientist", "senior", 
+               {"python": 5, "ml": 5, "deep_learning": 5, "spark": 4, "sql": 5}, 
+               None, None),
+        Pessoa("p21", "Ulisses Braga", "dev", "pleno", 
+               {"java": 5, "spring": 4, "aws": 4, "kubernetes": 3}, 
                None, None),
     ]
     
-    # ----- SQUADS -----
     squads = [
         # Linha Alpha
-        Squad("squad_a1", "Squad Pagamentos", "alpha", 
-              capacidade_max=5, capacidade_min=3,
-              necessidades={"dev": 2, "qa": 1},
-              skills_desejadas={"python": 3, "aws": 3}),
-        Squad("squad_a2", "Squad Checkout", "alpha", 
-              capacidade_max=5, capacidade_min=3,
-              necessidades={"dev": 2, "qa": 1, "data_engineer": 1},
-              skills_desejadas={"python": 3, "react": 3}),
-        Squad("squad_a3", "Squad Analytics", "alpha", 
-              capacidade_max=4, capacidade_min=2,
-              necessidades={"dev": 1, "data_scientist": 1},
-              skills_desejadas={"python": 4, "ml": 3, "spark": 3}),
-        
-        # Linha Beta (para alocação de desalocados)
-        Squad("squad_b1", "Squad Mobile", "beta", 
+        Squad("squad_a1", "Pagamentos", "alpha", 
               capacidade_max=5, capacidade_min=3,
               necessidades={"dev": 3, "qa": 1},
-              skills_desejadas={"react": 4, "typescript": 3}),
-        Squad("squad_b2", "Squad Data Platform", "beta", 
+              skills_desejadas={"python": 4, "java": 4, "aws": 4}),
+        
+        Squad("squad_a2", "Checkout", "alpha", 
+              capacidade_max=5, capacidade_min=3,
+              necessidades={"dev": 3, "qa": 1},
+              skills_desejadas={"react": 4, "typescript": 4, "node": 3}),
+        
+        Squad("squad_a3", "Analytics", "alpha", 
+              capacidade_max=5, capacidade_min=2,
+              necessidades={"data_scientist": 2, "data_engineer": 1, "dev": 1},
+              skills_desejadas={"python": 4, "spark": 4, "ml": 3, "sql": 4}),
+        
+        Squad("squad_a4", "API Gateway", "alpha", 
               capacidade_max=4, capacidade_min=2,
-              necessidades={"data_engineer": 2, "data_scientist": 1},
-              skills_desejadas={"spark": 4, "python": 4, "kafka": 3}),
+              necessidades={"dev": 3, "qa": 1},
+              skills_desejadas={"java": 5, "spring": 4, "kubernetes": 4, "aws": 4}),
+        
+        # Linha Beta (para desalocados)
+        Squad("squad_b1", "Mobile", "beta", 
+              capacidade_max=5, capacidade_min=3,
+              necessidades={"dev": 3, "qa": 1},
+              skills_desejadas={"react": 4, "typescript": 4, "react_native": 3}),
+        
+        Squad("squad_b2", "Data Platform", "beta", 
+              capacidade_max=5, capacidade_min=2,
+              necessidades={"data_engineer": 2, "data_scientist": 1, "dev": 1},
+              skills_desejadas={"spark": 5, "kafka": 4, "python": 4, "airflow": 4}),
     ]
     
-    # ----- RESTRIÇÕES PARAMETRIZÁVEIS -----
     restricoes = [
-        # Bruno não pode ir para Squad Analytics (exemplo: conflito pessoal)
-        Restricao("bloquear", pessoa_id="p2", squad_id="squad_a3"),
-        # Karen deve ir para Squad Data Platform (exemplo: projeto estratégico)
-        Restricao("forcar", pessoa_id="p11", squad_id="squad_b2"),
+        # Ana deve permanecer em Pagamentos (tech lead)
+        Restricao("forcar", pessoa_id="p1", squad_id="squad_a1"),
     ]
     
     return pessoas, squads, restricoes
@@ -148,391 +197,711 @@ def criar_dados_exemplo():
 # 3. FUNÇÕES DE SCORING
 # =============================================================================
 
-def calcular_fit_skill(pessoa: Pessoa, squad: Squad) -> int:
-    """
-    Calcula score de fit baseado nas skills da pessoa vs necessidades da squad.
-    Retorna valor de 0-100.
-    """
+def calcular_fit_skill(pessoa: Pessoa, squad: Squad) -> float:
+    """Calcula score de fit baseado nas skills (0-100)"""
     if not squad.skills_desejadas:
-        return 50  # neutro se squad não tem preferências
+        return 50.0
     
     score = 0
     max_score = 0
     
     for skill, nivel_minimo in squad.skills_desejadas.items():
-        max_score += 5  # máximo possível por skill
+        max_score += 5
         nivel_pessoa = pessoa.skills.get(skill, 0)
         
         if nivel_pessoa >= nivel_minimo:
-            # Bonus por atender ou exceder
             score += min(nivel_pessoa, 5)
         else:
-            # Penalidade por não atender
-            score += nivel_pessoa * 0.5
+            score += nivel_pessoa * 0.3  # Penalidade maior
     
-    if max_score == 0:
-        return 50
-    
-    return int((score / max_score) * 100)
+    return (score / max_score) * 100 if max_score > 0 else 50.0
 
 
-def calcular_fit_papel(pessoa: Pessoa, squad: Squad) -> int:
-    """
-    Calcula score baseado se o papel da pessoa é necessário na squad.
-    Retorna valor de 0-100.
-    """
+def calcular_fit_papel(pessoa: Pessoa, squad: Squad) -> float:
+    """Calcula score baseado no papel (0-100)"""
     if pessoa.papel in squad.necessidades:
-        return 100
-    return 30  # ainda pode contribuir, mas não é ideal
+        return 100.0
+    return 20.0
 
 
-def calcular_fit_total(pessoa: Pessoa, squad: Squad) -> int:
-    """
-    Combina diferentes fatores de fit.
-    Pesos podem ser ajustados conforme necessidade.
-    """
-    peso_skill = 0.6
-    peso_papel = 0.4
-    
-    fit_skill = calcular_fit_skill(pessoa, squad)
-    fit_papel = calcular_fit_papel(pessoa, squad)
-    
-    return int(fit_skill * peso_skill + fit_papel * peso_papel)
+def calcular_fit_total(pessoa: Pessoa, squad: Squad) -> float:
+    """Combina fatores de fit"""
+    return calcular_fit_skill(pessoa, squad) * 0.7 + calcular_fit_papel(pessoa, squad) * 0.3
+
+
+def criar_matriz_fit(pessoas: list, squads: list) -> pd.DataFrame:
+    """Cria matriz de fit pessoas x squads"""
+    data = []
+    for p in pessoas:
+        row = {"pessoa": p.nome, "pessoa_id": p.id, "papel": p.papel}
+        for s in squads:
+            row[s.nome] = round(calcular_fit_total(p, s), 1)
+        data.append(row)
+    return pd.DataFrame(data)
 
 
 # =============================================================================
-# 4. SOLVER - REDISTRIBUIÇÃO INTRA-LINHA
+# 4. SOLVER - REDISTRIBUIÇÃO
 # =============================================================================
 
-def redistribuir_linha(pessoas: list, squads: list, 
-                       linha: str, restricoes: list = None) -> dict:
-    """
-    Redistribui membros entre squads de uma mesma linha para balancear skills.
+def redistribuir_linha(pessoas: list, squads: list, linha: str, 
+                       restricoes: list = None, bonus_permanencia: int = 5) -> dict:
+    """Redistribui membros entre squads de uma linha"""
     
-    Args:
-        pessoas: Lista de todas as pessoas
-        squads: Lista de todas as squads
-        linha: ID da linha a ser redistribuída
-        restricoes: Lista de restrições parametrizáveis
-    
-    Returns:
-        Dicionário com alocações {pessoa_id: squad_id}
-    """
-    
-    # Filtrar pessoas e squads da linha
     pessoas_linha = [p for p in pessoas if p.linha_atual == linha]
     squads_linha = [s for s in squads if s.linha == linha]
     
     if not pessoas_linha or not squads_linha:
-        print(f"Linha '{linha}' sem pessoas ou squads para redistribuir.")
-        return {}
+        return {}, {}
     
-    print(f"\n{'='*60}")
-    print(f"REDISTRIBUIÇÃO - LINHA: {linha.upper()}")
-    print(f"{'='*60}")
-    print(f"Pessoas: {len(pessoas_linha)} | Squads: {len(squads_linha)}")
+    # Guardar alocação anterior
+    alocacao_anterior = {p.id: p.squad_atual for p in pessoas_linha}
     
-    # Criar modelo
     model = cp_model.CpModel()
     
-    # ----- VARIÁVEIS -----
-    # x[pessoa_id, squad_id] = 1 se pessoa alocada na squad
+    # Variáveis
     x = {}
     for p in pessoas_linha:
         for s in squads_linha:
             x[p.id, s.id] = model.NewBoolVar(f'x_{p.id}_{s.id}')
     
-    # ----- RESTRIÇÕES BÁSICAS -----
-    
-    # Cada pessoa em exatamente 1 squad
+    # Restrições básicas
     for p in pessoas_linha:
         model.Add(sum(x[p.id, s.id] for s in squads_linha) == 1)
     
-    # Respeitar capacidade das squads
     for s in squads_linha:
         membros = sum(x[p.id, s.id] for p in pessoas_linha)
         model.Add(membros <= s.capacidade_max)
         model.Add(membros >= s.capacidade_min)
     
-    # ----- RESTRIÇÕES PARAMETRIZÁVEIS -----
+    # Restrições parametrizáveis
     if restricoes:
         for r in restricoes:
             if r.tipo == "bloquear" and r.pessoa_id and r.squad_id:
                 if (r.pessoa_id, r.squad_id) in x:
                     model.Add(x[r.pessoa_id, r.squad_id] == 0)
-                    print(f"  [Restrição] Bloqueado: {r.pessoa_id} → {r.squad_id}")
-            
             elif r.tipo == "forcar" and r.pessoa_id and r.squad_id:
                 if (r.pessoa_id, r.squad_id) in x:
                     model.Add(x[r.pessoa_id, r.squad_id] == 1)
-                    print(f"  [Restrição] Forçado: {r.pessoa_id} → {r.squad_id}")
     
-    # ----- OBJETIVO -----
-    # Maximizar fit total + bonus por manter alocação atual (reduz churn)
-    
+    # Objetivo
     objetivo = []
-    BONUS_PERMANENCIA = 10  # bonus por não mudar de squad
-    
     for p in pessoas_linha:
         for s in squads_linha:
-            fit = calcular_fit_total(p, s)
-            
-            # Bonus se pessoa já está nessa squad
+            fit = int(calcular_fit_total(p, s) * 10)  # Escalar para inteiro
             if p.squad_atual == s.id:
-                fit += BONUS_PERMANENCIA
-            
+                fit += bonus_permanencia
             objetivo.append(fit * x[p.id, s.id])
     
     model.Maximize(sum(objetivo))
     
-    # ----- RESOLVER -----
+    # Resolver
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 30  # timeout
+    solver.parameters.max_time_in_seconds = 30
     status = solver.Solve(model)
     
-    # ----- EXTRAIR RESULTADOS -----
+    # Extrair resultados
+    resultado = {}
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        resultado = {}
-        mudancas = 0
-        
-        print(f"\nStatus: {'ÓTIMO' if status == cp_model.OPTIMAL else 'VIÁVEL'}")
-        print(f"\n{'Pessoa':<20} {'Papel':<15} {'De':<20} {'Para':<20} {'Fit':>5}")
-        print("-" * 85)
-        
         for p in pessoas_linha:
             for s in squads_linha:
                 if solver.Value(x[p.id, s.id]) == 1:
                     resultado[p.id] = s.id
-                    mudou = "→ MUDOU" if p.squad_atual != s.id else ""
-                    if p.squad_atual != s.id:
-                        mudancas += 1
-                    fit = calcular_fit_total(p, s)
-                    print(f"{p.nome:<20} {p.papel:<15} {p.squad_atual or 'N/A':<20} {s.id:<20} {fit:>5} {mudou}")
-        
-        print(f"\nTotal de mudanças: {mudancas}")
-        print(f"Score total: {int(solver.ObjectiveValue())}")
-        
-        return resultado
-    else:
-        print("❌ Não foi possível encontrar solução viável!")
-        print("   Verifique se as restrições não são conflitantes.")
-        return {}
+    
+    return resultado, alocacao_anterior
 
 
-# =============================================================================
-# 5. SOLVER - ALOCAÇÃO DE DESALOCADOS
-# =============================================================================
-
-def alocar_desalocados(pessoas: list, squads: list,
-                       restricoes: list = None) -> dict:
-    """
-    Aloca pessoas desalocadas nas squads com déficit.
+def alocar_desalocados(pessoas: list, squads: list, restricoes: list = None) -> dict:
+    """Aloca pessoas desalocadas nas squads com déficit"""
     
-    Args:
-        pessoas: Lista de todas as pessoas
-        squads: Lista de todas as squads
-        restricoes: Lista de restrições parametrizáveis
-    
-    Returns:
-        Dicionário com alocações {pessoa_id: squad_id}
-    """
-    
-    # Filtrar pessoas desalocadas
     desalocados = [p for p in pessoas if p.squad_atual is None]
-    
     if not desalocados:
-        print("Não há pessoas desalocadas.")
         return {}
     
-    # Calcular vagas disponíveis por squad
-    alocados_por_squad = {}
+    # Calcular vagas
+    alocados_por_squad = defaultdict(int)
     for p in pessoas:
         if p.squad_atual:
-            alocados_por_squad[p.squad_atual] = alocados_por_squad.get(p.squad_atual, 0) + 1
+            alocados_por_squad[p.squad_atual] += 1
     
     squads_com_vaga = []
     for s in squads:
-        atual = alocados_por_squad.get(s.id, 0)
-        vagas = s.capacidade_max - atual
+        vagas = s.capacidade_max - alocados_por_squad.get(s.id, 0)
         if vagas > 0:
             squads_com_vaga.append((s, vagas))
     
     if not squads_com_vaga:
-        print("Não há vagas disponíveis em nenhuma squad.")
         return {}
     
-    print(f"\n{'='*60}")
-    print("ALOCAÇÃO DE DESALOCADOS")
-    print(f"{'='*60}")
-    print(f"Pessoas desalocadas: {len(desalocados)}")
-    print(f"Squads com vagas: {len(squads_com_vaga)}")
-    print("\nVagas disponíveis:")
-    for s, vagas in squads_com_vaga:
-        print(f"  - {s.nome} ({s.linha}): {vagas} vaga(s)")
-    
-    # Criar modelo
     model = cp_model.CpModel()
     
-    # ----- VARIÁVEIS -----
     x = {}
     for p in desalocados:
         for s, _ in squads_com_vaga:
             x[p.id, s.id] = model.NewBoolVar(f'x_{p.id}_{s.id}')
     
-    # ----- RESTRIÇÕES BÁSICAS -----
-    
-    # Cada pessoa em no máximo 1 squad (pode ficar sem se não houver fit)
     for p in desalocados:
         model.Add(sum(x[p.id, s.id] for s, _ in squads_com_vaga) <= 1)
     
-    # Respeitar vagas disponíveis
     for s, vagas in squads_com_vaga:
         model.Add(sum(x[p.id, s.id] for p in desalocados) <= vagas)
     
-    # ----- RESTRIÇÕES PARAMETRIZÁVEIS -----
     if restricoes:
         for r in restricoes:
-            if r.tipo == "bloquear" and r.pessoa_id and r.squad_id:
-                if (r.pessoa_id, r.squad_id) in x:
-                    model.Add(x[r.pessoa_id, r.squad_id] == 0)
-                    print(f"  [Restrição] Bloqueado: {r.pessoa_id} → {r.squad_id}")
-            
-            elif r.tipo == "forcar" and r.pessoa_id and r.squad_id:
+            if r.tipo == "forcar" and r.pessoa_id and r.squad_id:
                 if (r.pessoa_id, r.squad_id) in x:
                     model.Add(x[r.pessoa_id, r.squad_id] == 1)
-                    print(f"  [Restrição] Forçado: {r.pessoa_id} → {r.squad_id}")
-            
-            elif r.tipo == "bloquear" and r.pessoa_id and r.linha_id:
-                # Bloquear pessoa de toda uma linha
-                for s, _ in squads_com_vaga:
-                    if s.linha == r.linha_id and (r.pessoa_id, s.id) in x:
-                        model.Add(x[r.pessoa_id, s.id] == 0)
-                print(f"  [Restrição] Bloqueado: {r.pessoa_id} → linha {r.linha_id}")
-    
-    # ----- OBJETIVO -----
-    # Maximizar fit total + priorizar alocar o máximo de pessoas
-    
-    BONUS_ALOCACAO = 50  # bonus por alocar alguém (prioriza não deixar desalocado)
     
     objetivo = []
     for p in desalocados:
         for s, _ in squads_com_vaga:
-            fit = calcular_fit_total(p, s) + BONUS_ALOCACAO
+            fit = int(calcular_fit_total(p, s) * 10) + 500  # Bonus alocação
             objetivo.append(fit * x[p.id, s.id])
     
     model.Maximize(sum(objetivo))
     
-    # ----- RESOLVER -----
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30
     status = solver.Solve(model)
     
-    # ----- EXTRAIR RESULTADOS -----
+    resultado = {}
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        resultado = {}
-        alocados_count = 0
-        
-        print(f"\nStatus: {'ÓTIMO' if status == cp_model.OPTIMAL else 'VIÁVEL'}")
-        print(f"\n{'Pessoa':<20} {'Papel':<15} {'Alocado em':<25} {'Linha':<10} {'Fit':>5}")
-        print("-" * 80)
-        
         for p in desalocados:
-            alocado = False
             for s, _ in squads_com_vaga:
                 if solver.Value(x[p.id, s.id]) == 1:
                     resultado[p.id] = s.id
-                    fit = calcular_fit_total(p, s)
-                    print(f"{p.nome:<20} {p.papel:<15} {s.nome:<25} {s.linha:<10} {fit:>5}")
-                    alocados_count += 1
-                    alocado = True
-                    break
-            
-            if not alocado:
-                print(f"{p.nome:<20} {p.papel:<15} {'❌ Não alocado':<25}")
-        
-        print(f"\nAlocados: {alocados_count}/{len(desalocados)}")
-        print(f"Score total: {int(solver.ObjectiveValue())}")
-        
-        return resultado
-    else:
-        print("❌ Não foi possível encontrar solução viável!")
-        return {}
+    
+    return resultado
 
 
 # =============================================================================
-# 6. RELATÓRIO DE DIAGNÓSTICO
+# 5. VISUALIZAÇÕES
 # =============================================================================
 
-def gerar_diagnostico(pessoas: list, squads: list):
-    """Gera relatório de diagnóstico da situação atual"""
+def plot_heatmap_fit(pessoas: list, squads: list, titulo: str = "Matriz de Fit"):
+    """Heatmap de fit pessoas x squads"""
     
-    print(f"\n{'='*60}")
-    print("DIAGNÓSTICO DA SITUAÇÃO ATUAL")
-    print(f"{'='*60}")
+    df = criar_matriz_fit(pessoas, squads)
     
-    # Contagem por squad
-    print("\n📊 OCUPAÇÃO DAS SQUADS:")
-    print("-" * 50)
+    # Preparar dados para heatmap
+    squad_names = [s.nome for s in squads]
+    heatmap_data = df[squad_names].values
+    pessoas_names = df['pessoa'].tolist()
+    
+    fig, ax = plt.subplots(figsize=(12, max(8, len(pessoas) * 0.4)))
+    
+    sns.heatmap(
+        heatmap_data, 
+        annot=True, 
+        fmt='.0f',
+        cmap='RdYlGn',
+        xticklabels=squad_names,
+        yticklabels=pessoas_names,
+        vmin=0, 
+        vmax=100,
+        ax=ax,
+        cbar_kws={'label': 'Fit Score'}
+    )
+    
+    ax.set_title(titulo, fontsize=14, fontweight='bold')
+    ax.set_xlabel('Squads', fontsize=11)
+    ax.set_ylabel('Pessoas', fontsize=11)
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    
+    return fig
+
+
+def plot_mudancas_sankey(pessoas: list, squads: list, 
+                         alocacao_anterior: dict, alocacao_nova: dict):
+    """Visualiza fluxo de mudanças entre squads (versão simplificada com barras)"""
+    
+    squad_map = {s.id: s.nome for s in squads}
+    
+    # Contar mudanças
+    mudancas = []
+    permanencias = []
+    
+    for pessoa_id, squad_nova in alocacao_nova.items():
+        squad_antiga = alocacao_anterior.get(pessoa_id)
+        pessoa = next((p for p in pessoas if p.id == pessoa_id), None)
+        
+        if pessoa and squad_antiga and squad_antiga != squad_nova:
+            mudancas.append({
+                'pessoa': pessoa.nome,
+                'de': squad_map.get(squad_antiga, squad_antiga),
+                'para': squad_map.get(squad_nova, squad_nova),
+                'papel': pessoa.papel
+            })
+        elif pessoa and squad_antiga == squad_nova:
+            permanencias.append({
+                'pessoa': pessoa.nome,
+                'squad': squad_map.get(squad_nova, squad_nova),
+                'papel': pessoa.papel
+            })
+    
+    if not mudancas:
+        print("Nenhuma mudança para visualizar.")
+        return None
+    
+    # Criar figura com subplots
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # --- Gráfico 1: Mudanças por Squad ---
+    df_mud = pd.DataFrame(mudancas)
+    
+    # Contar saídas e entradas por squad
+    saidas = df_mud.groupby('de').size()
+    entradas = df_mud.groupby('para').size()
+    
+    all_squads = list(set(saidas.index) | set(entradas.index))
+    
+    x = np.arange(len(all_squads))
+    width = 0.35
+    
+    saidas_vals = [saidas.get(s, 0) for s in all_squads]
+    entradas_vals = [entradas.get(s, 0) for s in all_squads]
+    
+    bars1 = axes[0].bar(x - width/2, saidas_vals, width, label='Saídas', color='#e74c3c')
+    bars2 = axes[0].bar(x + width/2, entradas_vals, width, label='Entradas', color='#27ae60')
+    
+    axes[0].set_ylabel('Número de Pessoas')
+    axes[0].set_title('Fluxo de Pessoas por Squad', fontweight='bold')
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(all_squads, rotation=45, ha='right')
+    axes[0].legend()
+    axes[0].axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+    
+    # Adicionar valores nas barras
+    for bar in bars1:
+        if bar.get_height() > 0:
+            axes[0].annotate(f'{int(bar.get_height())}',
+                           xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                           ha='center', va='bottom', fontsize=10)
+    for bar in bars2:
+        if bar.get_height() > 0:
+            axes[0].annotate(f'{int(bar.get_height())}',
+                           xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                           ha='center', va='bottom', fontsize=10)
+    
+    # --- Gráfico 2: Lista de Mudanças ---
+    axes[1].axis('off')
+    
+    table_data = [[m['pessoa'], m['papel'], m['de'], '→', m['para']] for m in mudancas]
+    
+    table = axes[1].table(
+        cellText=table_data,
+        colLabels=['Pessoa', 'Papel', 'De', '', 'Para'],
+        loc='center',
+        cellLoc='center',
+        colWidths=[0.25, 0.15, 0.25, 0.05, 0.25]
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
+    
+    # Colorir header
+    for i in range(5):
+        table[(0, i)].set_facecolor('#3498db')
+        table[(0, i)].set_text_props(color='white', fontweight='bold')
+    
+    axes[1].set_title('Detalhamento das Mudanças', fontweight='bold', pad=20)
+    
+    plt.tight_layout()
+    return fig
+
+
+def plot_comparacao_antes_depois(pessoas: list, squads: list,
+                                  alocacao_anterior: dict, alocacao_nova: dict):
+    """Compara fit médio antes e depois por squad"""
+    
+    squads_linha = [s for s in squads if s.linha == "alpha"]
+    squad_map = {s.id: s for s in squads_linha}
+    
+    # Calcular fit médio antes e depois
+    fit_antes = defaultdict(list)
+    fit_depois = defaultdict(list)
+    
+    for pessoa_id, squad_antes_id in alocacao_anterior.items():
+        pessoa = next((p for p in pessoas if p.id == pessoa_id), None)
+        if pessoa and squad_antes_id in squad_map:
+            fit = calcular_fit_total(pessoa, squad_map[squad_antes_id])
+            fit_antes[squad_map[squad_antes_id].nome].append(fit)
+    
+    for pessoa_id, squad_depois_id in alocacao_nova.items():
+        pessoa = next((p for p in pessoas if p.id == pessoa_id), None)
+        if pessoa and squad_depois_id in squad_map:
+            fit = calcular_fit_total(pessoa, squad_map[squad_depois_id])
+            fit_depois[squad_map[squad_depois_id].nome].append(fit)
+    
+    # Preparar dados
+    squad_names = [s.nome for s in squads_linha]
+    media_antes = [np.mean(fit_antes.get(s, [0])) for s in squad_names]
+    media_depois = [np.mean(fit_depois.get(s, [0])) for s in squad_names]
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    x = np.arange(len(squad_names))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, media_antes, width, label='Antes', color='#e74c3c', alpha=0.8)
+    bars2 = ax.bar(x + width/2, media_depois, width, label='Depois', color='#27ae60', alpha=0.8)
+    
+    ax.set_ylabel('Fit Médio', fontsize=11)
+    ax.set_title('Comparação de Fit Médio por Squad: Antes vs Depois', fontsize=13, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(squad_names, fontsize=10)
+    ax.legend()
+    ax.set_ylim(0, 100)
+    
+    # Linha de referência
+    ax.axhline(y=70, color='gray', linestyle='--', alpha=0.5, label='Meta (70)')
+    
+    # Adicionar valores e deltas
+    for i, (antes, depois) in enumerate(zip(media_antes, media_depois)):
+        delta = depois - antes
+        color = '#27ae60' if delta > 0 else '#e74c3c'
+        ax.annotate(f'{antes:.0f}', xy=(x[i] - width/2, antes + 1), ha='center', fontsize=9)
+        ax.annotate(f'{depois:.0f}', xy=(x[i] + width/2, depois + 1), ha='center', fontsize=9)
+        
+        if abs(delta) > 0.1:
+            ax.annotate(f'{"+" if delta > 0 else ""}{delta:.1f}',
+                       xy=(x[i], max(antes, depois) + 5),
+                       ha='center', fontsize=10, fontweight='bold', color=color)
+    
+    plt.tight_layout()
+    return fig
+
+
+def plot_distribuicao_skills_squad(pessoas: list, squads: list, alocacao: dict):
+    """Radar chart de skills por squad"""
+    
+    squads_alpha = [s for s in squads if s.linha == "alpha"]
+    
+    # Coletar todas as skills únicas
+    all_skills = set()
+    for s in squads_alpha:
+        all_skills.update(s.skills_desejadas.keys())
+    all_skills = sorted(list(all_skills))
+    
+    if len(all_skills) < 3:
+        print("Skills insuficientes para radar chart")
+        return None
+    
+    # Limitar a 8 skills para visualização
+    all_skills = all_skills[:8]
+    
+    n_skills = len(all_skills)
+    angles = np.linspace(0, 2 * np.pi, n_skills, endpoint=False).tolist()
+    angles += angles[:1]  # Fechar o círculo
+    
+    fig, axes = plt.subplots(2, 2, figsize=(12, 12), subplot_kw=dict(polar=True))
+    axes = axes.flatten()
+    
+    colors = ['#3498db', '#e74c3c', '#27ae60', '#9b59b6']
+    
+    for idx, squad in enumerate(squads_alpha[:4]):
+        ax = axes[idx]
+        
+        # Encontrar pessoas nesta squad
+        pessoas_squad = [p for p in pessoas if alocacao.get(p.id) == squad.id]
+        
+        if not pessoas_squad:
+            continue
+        
+        # Calcular média de skills
+        skill_means = []
+        for skill in all_skills:
+            valores = [p.skills.get(skill, 0) for p in pessoas_squad]
+            skill_means.append(np.mean(valores))
+        
+        skill_means += skill_means[:1]
+        
+        # Skills desejadas pela squad
+        skill_required = [squad.skills_desejadas.get(skill, 0) for skill in all_skills]
+        skill_required += skill_required[:1]
+        
+        # Plot
+        ax.plot(angles, skill_means, 'o-', linewidth=2, color=colors[idx], label='Atual')
+        ax.fill(angles, skill_means, alpha=0.25, color=colors[idx])
+        ax.plot(angles, skill_required, '--', linewidth=2, color='gray', alpha=0.7, label='Desejado')
+        
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(all_skills, size=9)
+        ax.set_ylim(0, 5)
+        ax.set_title(f'{squad.nome}\n({len(pessoas_squad)} pessoas)', size=11, fontweight='bold', pad=10)
+        ax.legend(loc='upper right', fontsize=8)
+    
+    plt.suptitle('Perfil de Skills por Squad (Atual vs Desejado)', fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def plot_resumo_alocacao(pessoas: list, squads: list, alocacao: dict):
+    """Dashboard resumo da alocação"""
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # --- 1. Ocupação por Squad ---
+    ax1 = axes[0, 0]
+    squad_names = [s.nome for s in squads]
+    ocupacao = []
+    capacidade = []
     
     for s in squads:
-        membros = [p for p in pessoas if p.squad_atual == s.id]
-        ocupacao = len(membros)
-        status = "✅" if s.capacidade_min <= ocupacao <= s.capacidade_max else "⚠️"
-        
-        print(f"\n{status} {s.nome} ({s.linha})")
-        print(f"   Ocupação: {ocupacao}/{s.capacidade_max} (mín: {s.capacidade_min})")
-        
-        # Verificar necessidades de papéis
-        papeis_presentes = {}
-        for m in membros:
-            papeis_presentes[m.papel] = papeis_presentes.get(m.papel, 0) + 1
-        
-        for papel, qtd_necessaria in s.necessidades.items():
-            qtd_presente = papeis_presentes.get(papel, 0)
-            check = "✓" if qtd_presente >= qtd_necessaria else "✗"
-            print(f"   [{check}] {papel}: {qtd_presente}/{qtd_necessaria}")
+        count = sum(1 for pid, sid in alocacao.items() if sid == s.id)
+        count += sum(1 for p in pessoas if p.squad_atual == s.id and p.id not in alocacao)
+        ocupacao.append(count)
+        capacidade.append(s.capacidade_max)
     
-    # Pessoas desalocadas
-    desalocados = [p for p in pessoas if p.squad_atual is None]
-    if desalocados:
-        print(f"\n⚠️  PESSOAS DESALOCADAS: {len(desalocados)}")
-        print("-" * 50)
-        for p in desalocados:
-            skills_str = ", ".join([f"{k}:{v}" for k, v in list(p.skills.items())[:3]])
-            print(f"   • {p.nome} ({p.papel}, {p.senioridade}) - {skills_str}...")
+    x = np.arange(len(squad_names))
+    bars = ax1.bar(x, ocupacao, color='#3498db', alpha=0.8)
+    ax1.bar(x, capacidade, fill=False, edgecolor='gray', linestyle='--', linewidth=2)
+    
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(squad_names, rotation=45, ha='right')
+    ax1.set_ylabel('Pessoas')
+    ax1.set_title('Ocupação vs Capacidade', fontweight='bold')
+    
+    for i, (o, c) in enumerate(zip(ocupacao, capacidade)):
+        color = '#27ae60' if o >= squads[i].capacidade_min else '#e74c3c'
+        ax1.annotate(f'{o}/{c}', xy=(i, o + 0.2), ha='center', fontsize=10, color=color)
+    
+    # --- 2. Distribuição por Papel ---
+    ax2 = axes[0, 1]
+    papeis = defaultdict(int)
+    for p in pessoas:
+        papeis[p.papel] += 1
+    
+    colors_papel = ['#3498db', '#e74c3c', '#27ae60', '#f39c12', '#9b59b6']
+    ax2.pie(papeis.values(), labels=papeis.keys(), autopct='%1.0f%%', 
+            colors=colors_papel[:len(papeis)], startangle=90)
+    ax2.set_title('Distribuição por Papel', fontweight='bold')
+    
+    # --- 3. Fit Médio por Squad ---
+    ax3 = axes[1, 0]
+    fit_medio = []
+    
+    for s in squads:
+        fits = []
+        for p in pessoas:
+            if alocacao.get(p.id) == s.id or (p.squad_atual == s.id and p.id not in alocacao):
+                fits.append(calcular_fit_total(p, s))
+        fit_medio.append(np.mean(fits) if fits else 0)
+    
+    colors_fit = ['#27ae60' if f >= 70 else '#f39c12' if f >= 50 else '#e74c3c' for f in fit_medio]
+    bars = ax3.barh(squad_names, fit_medio, color=colors_fit, alpha=0.8)
+    ax3.set_xlim(0, 100)
+    ax3.axvline(x=70, color='gray', linestyle='--', alpha=0.5)
+    ax3.set_xlabel('Fit Médio')
+    ax3.set_title('Fit Médio por Squad', fontweight='bold')
+    
+    for i, v in enumerate(fit_medio):
+        ax3.annotate(f'{v:.0f}', xy=(v + 1, i), va='center', fontsize=10)
+    
+    # --- 4. Status Geral ---
+    ax4 = axes[1, 1]
+    ax4.axis('off')
+    
+    total_pessoas = len(pessoas)
+    alocados = len([p for p in pessoas if p.squad_atual or p.id in alocacao])
+    desalocados = total_pessoas - alocados
+    fit_geral = np.mean([f for f in fit_medio if f > 0])
+    
+    stats_text = f"""
+    RESUMO GERAL
+    ════════════════════════════
+    
+    Total de Pessoas:     {total_pessoas}
+    Alocados:             {alocados}
+    Desalocados:          {desalocados}
+    
+    Fit Médio Geral:      {fit_geral:.1f}
+    
+    Squads:               {len(squads)}
+    Linhas:               {len(set(s.linha for s in squads))}
+    """
+    
+    ax4.text(0.1, 0.5, stats_text, transform=ax4.transAxes, fontsize=12,
+             fontfamily='monospace', verticalalignment='center',
+             bbox=dict(boxstyle='round', facecolor='#ecf0f1', alpha=0.8))
+    
+    plt.suptitle('Dashboard de Alocação', fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    return fig
 
 
 # =============================================================================
-# 7. MAIN - EXECUÇÃO
+# 6. RELATÓRIO TEXTUAL
+# =============================================================================
+
+def imprimir_relatorio(pessoas: list, squads: list, 
+                       alocacao_anterior: dict, alocacao_nova: dict,
+                       titulo: str):
+    """Imprime relatório detalhado das mudanças"""
+    
+    print(f"\n{'='*70}")
+    print(f" {titulo}")
+    print(f"{'='*70}")
+    
+    squad_map = {s.id: s.nome for s in squads}
+    pessoa_map = {p.id: p for p in pessoas}
+    
+    mudancas = []
+    permanencias = []
+    
+    for pessoa_id, squad_nova in alocacao_nova.items():
+        squad_antiga = alocacao_anterior.get(pessoa_id)
+        pessoa = pessoa_map.get(pessoa_id)
+        
+        if not pessoa:
+            continue
+            
+        squad_obj = next((s for s in squads if s.id == squad_nova), None)
+        fit_novo = calcular_fit_total(pessoa, squad_obj) if squad_obj else 0
+        
+        if squad_antiga and squad_antiga != squad_nova:
+            squad_antiga_obj = next((s for s in squads if s.id == squad_antiga), None)
+            fit_antigo = calcular_fit_total(pessoa, squad_antiga_obj) if squad_antiga_obj else 0
+            
+            mudancas.append({
+                'pessoa': pessoa,
+                'de': squad_map.get(squad_antiga, squad_antiga),
+                'para': squad_map.get(squad_nova, squad_nova),
+                'fit_antigo': fit_antigo,
+                'fit_novo': fit_novo,
+                'delta': fit_novo - fit_antigo
+            })
+        else:
+            permanencias.append({
+                'pessoa': pessoa,
+                'squad': squad_map.get(squad_nova, squad_nova),
+                'fit': fit_novo
+            })
+    
+    # Mudanças
+    if mudancas:
+        print(f"\n🔄 MUDANÇAS ({len(mudancas)} pessoas):")
+        print("-" * 70)
+        print(f"{'Pessoa':<20} {'Papel':<12} {'De':<15} {'Para':<15} {'Δ Fit':>8}")
+        print("-" * 70)
+        
+        for m in sorted(mudancas, key=lambda x: -x['delta']):
+            delta_str = f"+{m['delta']:.0f}" if m['delta'] > 0 else f"{m['delta']:.0f}"
+            delta_emoji = "📈" if m['delta'] > 0 else "📉"
+            print(f"{m['pessoa'].nome:<20} {m['pessoa'].papel:<12} {m['de']:<15} {m['para']:<15} {delta_str:>6} {delta_emoji}")
+    
+    # Permanências
+    if permanencias:
+        print(f"\n✅ PERMANÊNCIAS ({len(permanencias)} pessoas):")
+        print("-" * 50)
+        for p in permanencias:
+            print(f"   {p['pessoa'].nome:<20} → {p['squad']:<15} (fit: {p['fit']:.0f})")
+    
+    # Estatísticas
+    if mudancas:
+        delta_medio = np.mean([m['delta'] for m in mudancas])
+        melhorias = len([m for m in mudancas if m['delta'] > 0])
+        print(f"\n📊 ESTATÍSTICAS:")
+        print(f"   Δ Fit médio nas mudanças: {delta_medio:+.1f}")
+        print(f"   Mudanças com melhoria: {melhorias}/{len(mudancas)}")
+
+
+# =============================================================================
+# 7. MAIN
 # =============================================================================
 
 def main():
-    # Carregar dados
-    pessoas, squads, restricoes = criar_dados_exemplo()
+    print("Carregando dados...")
+    pessoas, squads, restricoes = criar_dados_expandidos()
     
-    # Diagnóstico inicial
-    gerar_diagnostico(pessoas, squads)
+    print(f"Total: {len(pessoas)} pessoas, {len(squads)} squads")
     
-    # Problema 1: Redistribuição da linha Alpha
-    resultado_redistribuicao = redistribuir_linha(
-        pessoas, squads, 
-        linha="alpha", 
-        restricoes=restricoes
+    # ========== PROBLEMA 1: Redistribuição da Linha Alpha ==========
+    print("\n" + "="*70)
+    print(" EXECUTANDO REDISTRIBUIÇÃO - LINHA ALPHA")
+    print("="*70)
+    
+    alocacao_nova, alocacao_anterior = redistribuir_linha(
+        pessoas, squads, "alpha", restricoes, bonus_permanencia=3
     )
     
-    # Problema 2: Alocar desalocados
-    resultado_alocacao = alocar_desalocados(
-        pessoas, squads,
-        restricoes=restricoes
+    imprimir_relatorio(
+        pessoas, squads, alocacao_anterior, alocacao_nova,
+        "REDISTRIBUIÇÃO - LINHA ALPHA"
     )
     
-    # Resumo final
-    print(f"\n{'='*60}")
-    print("RESUMO FINAL")
-    print(f"{'='*60}")
-    print(f"Redistribuições na linha Alpha: {len(resultado_redistribuicao)} pessoas")
-    print(f"Novas alocações: {len(resultado_alocacao)} pessoas")
+    # ========== PROBLEMA 2: Alocação de Desalocados ==========
+    print("\n" + "="*70)
+    print(" EXECUTANDO ALOCAÇÃO DE DESALOCADOS")
+    print("="*70)
+    
+    alocacao_desalocados = alocar_desalocados(pessoas, squads, restricoes)
+    
+    desalocados_anterior = {p.id: None for p in pessoas if p.squad_atual is None}
+    
+    imprimir_relatorio(
+        pessoas, squads, desalocados_anterior, alocacao_desalocados,
+        "ALOCAÇÃO DE DESALOCADOS"
+    )
+    
+    # ========== VISUALIZAÇÕES ==========
+    print("\n" + "="*70)
+    print(" GERANDO VISUALIZAÇÕES")
+    print("="*70)
+    
+    # Combinar alocações para visualização completa
+    alocacao_completa = {**alocacao_nova, **alocacao_desalocados}
+    
+    # 1. Heatmap de Fit
+    print("  → Gerando heatmap de fit...")
+    fig1 = plot_heatmap_fit(
+        [p for p in pessoas if p.linha_atual == "alpha"], 
+        [s for s in squads if s.linha == "alpha"],
+        "Matriz de Fit - Linha Alpha"
+    )
+    fig1.savefig('/home/claude/01_heatmap_fit.png', dpi=150, bbox_inches='tight')
+    print("    Salvo: 01_heatmap_fit.png")
+    
+    # 2. Mudanças
+    print("  → Gerando visualização de mudanças...")
+    fig2 = plot_mudancas_sankey(pessoas, squads, alocacao_anterior, alocacao_nova)
+    if fig2:
+        fig2.savefig('/home/claude/02_mudancas.png', dpi=150, bbox_inches='tight')
+        print("    Salvo: 02_mudancas.png")
+    
+    # 3. Comparação Antes/Depois
+    print("  → Gerando comparação antes/depois...")
+    fig3 = plot_comparacao_antes_depois(pessoas, squads, alocacao_anterior, alocacao_nova)
+    fig3.savefig('/home/claude/03_comparacao_antes_depois.png', dpi=150, bbox_inches='tight')
+    print("    Salvo: 03_comparacao_antes_depois.png")
+    
+    # 4. Radar de Skills
+    print("  → Gerando radar de skills...")
+    fig4 = plot_distribuicao_skills_squad(pessoas, squads, alocacao_nova)
+    if fig4:
+        fig4.savefig('/home/claude/04_radar_skills.png', dpi=150, bbox_inches='tight')
+        print("    Salvo: 04_radar_skills.png")
+    
+    # 5. Dashboard Resumo
+    print("  → Gerando dashboard resumo...")
+    fig5 = plot_resumo_alocacao(pessoas, squads, alocacao_completa)
+    fig5.savefig('/home/claude/05_dashboard_resumo.png', dpi=150, bbox_inches='tight')
+    print("    Salvo: 05_dashboard_resumo.png")
+    
+    plt.close('all')
+    
+    print("\n" + "="*70)
+    print(" CONCLUÍDO!")
+    print("="*70)
+    print("\nArquivos gerados:")
+    print("  • 01_heatmap_fit.png")
+    print("  • 02_mudancas.png")
+    print("  • 03_comparacao_antes_depois.png")
+    print("  • 04_radar_skills.png")
+    print("  • 05_dashboard_resumo.png")
 
 
 if __name__ == "__main__":
     main()
+
